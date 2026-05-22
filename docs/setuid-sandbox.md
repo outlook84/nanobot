@@ -40,9 +40,9 @@ Supported forms:
 
 UID and GID values must be non-root numeric IDs.
 
-Exec commands keep only `CAP_NET_RAW` in the Linux capability sets. This allows
-network tools that need raw sockets, while dropping other capabilities before
-running user commands.
+Exec commands do not preserve Linux capabilities. This keeps the backend
+compatible with rootless container runtimes that reject capability changes, but
+means tools that require raw sockets, such as some `ping` variants, may not work.
 
 ## Build
 

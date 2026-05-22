@@ -122,9 +122,7 @@ class TestSetuidBackend:
         assert "--regid" in tokens
         assert tokens[tokens.index("--regid") + 1] == "1001"
         assert "--clear-groups" in tokens
-        assert "--inh-caps=-all,+net_raw" in tokens
-        assert "--ambient-caps=-all,+net_raw" in tokens
-        assert "--bounding-set=-all,+net_raw" in tokens
+        assert not any("caps" in token or "bounding-set" in token for token in tokens)
         assert "--no-new-privs" in tokens
 
         sep = tokens.index("--")
