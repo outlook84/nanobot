@@ -185,6 +185,46 @@ async def test_exec_ignores_workspace_check_when_not_restricted(tmp_path):
     assert "outside the configured workspace" not in result
 
 
+@pytest.mark.asyncio
+async def test_setuid_sandbox_forces_workspace_check(tmp_path):
+    """setuid sandbox mode must not rely on users also enabling restrict_to_workspace."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret", encoding="utf-8")
+
+    tool = ExecTool(
+        working_dir=str(workspace),
+        restrict_to_workspace=False,
+        sandbox="setuid",
+        timeout=5,
+    )
+    result = await tool.execute(command=f"cat {outside}")
+
+    assert "path outside working dir" in result
+
+
+@pytest.mark.asyncio
+async def test_setuid_allows_workspace_root_path_from_subdir(tmp_path):
+    """setuid workspace checks should be anchored to the configured workspace."""
+    workspace = tmp_path / "workspace"
+    subdir = workspace / "src"
+    subdir.mkdir(parents=True)
+    readme = workspace / "README.md"
+    readme.write_text("ok", encoding="utf-8")
+
+    tool = ExecTool(
+        working_dir=str(workspace),
+        restrict_to_workspace=False,
+        sandbox="setuid",
+        timeout=5,
+    )
+    result = await tool.execute(command=f"echo {readme}", working_dir=str(subdir))
+
+    assert str(readme) in result
+    assert "path outside working dir" not in result
+
+
 # --- #3599: stdio redirects to /dev/null must not trip the workspace guard ----
 
 

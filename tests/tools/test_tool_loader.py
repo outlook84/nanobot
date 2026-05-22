@@ -81,7 +81,7 @@ from nanobot.agent.tools.loader import ToolLoader, _SKIP_MODULES
 
 def test_skip_modules_excludes_infrastructure():
     infra = {"base", "schema", "registry", "context", "loader", "config",
-             "file_state", "sandbox", "mcp", "__init__"}
+             "file_state", "sandbox", "sandbox_setuid", "mcp", "__init__"}
     assert infra <= _SKIP_MODULES
 
 

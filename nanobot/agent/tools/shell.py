@@ -182,8 +182,8 @@ class ExecTool(Tool):
             r"\bsed\s+-i[^|;&<>]*(?:history\.jsonl|\.dream_cursor)",  # sed -i
         ]
         self.allow_patterns = allow_patterns or []
-        self.restrict_to_workspace = restrict_to_workspace
         self.path_append = path_append
+        self.restrict_to_workspace = restrict_to_workspace or sandbox.startswith("setuid")
         self.allowed_env_keys = allowed_env_keys or []
         self._session_manager = session_manager or DEFAULT_EXEC_SESSION_MANAGER
 
@@ -368,7 +368,8 @@ class ExecTool(Tool):
                     + _WORKSPACE_BOUNDARY_NOTE
                 )
 
-        guard_error = self._guard_command(command, cwd)
+        guard_cwd = self.working_dir if self.restrict_to_workspace and self.working_dir else cwd
+        guard_error = self._guard_command(command, guard_cwd)
         if guard_error:
             return guard_error
 
