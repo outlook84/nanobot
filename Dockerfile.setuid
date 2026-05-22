@@ -40,12 +40,27 @@ RUN apk add --no-cache \
         bash \
         bubblewrap \
         ca-certificates \
+        coreutils \
+        curl \
+        diffutils \
+        file \
+        findutils \
+        gawk \
         git \
+        grep \
+        jq \
         libjpeg-turbo \
         libxml2 \
         libxslt \
         openssh-client \
-        util-linux-misc
+        patch \
+        procps \
+        ripgrep \
+        sed \
+        setpriv \
+        tar \
+        unzip \
+        xz
 
 WORKDIR /app
 
