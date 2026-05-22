@@ -193,11 +193,11 @@ class ExecTool(Tool):
             r"\bsed\s+-i[^|;&<>]*(?:history\.jsonl|\.dream_cursor)",  # sed -i
         ]
         self.allow_patterns = allow_patterns or []
-        self.restrict_to_workspace = restrict_to_workspace
         if allow_local_preview_access is not None:
             webui_allow_local_service_access = allow_local_preview_access
         self.webui_allow_local_service_access = webui_allow_local_service_access
         self.path_append = path_append
+        self.restrict_to_workspace = restrict_to_workspace or sandbox.startswith("setuid")
         self.allowed_env_keys = allowed_env_keys or []
         self._session_manager = session_manager or DEFAULT_EXEC_SESSION_MANAGER
 
@@ -389,9 +389,10 @@ class ExecTool(Tool):
                     + _WORKSPACE_BOUNDARY_NOTE
                 )
 
+        guard_cwd = workspace_root if access.restrict_to_workspace and workspace_root else cwd
         guard_error = self._guard_command(
             command,
-            cwd,
+            guard_cwd,
             restrict_to_workspace=access.restrict_to_workspace,
         )
         if guard_error:

@@ -109,6 +109,90 @@ class TestBwrapBackend:
         assert (str(fake_media), str(fake_media)) in try_pairs
 
 
+class TestSetuidBackend:
+    def test_default_uid_gid(self, tmp_path):
+        ws = str(tmp_path / "project")
+        result = wrap_command("setuid", "id", ws, ws)
+        tokens = _parse(result)
+
+        assert tokens[:2] == ["env", f"HOME={tmp_path / 'project'}"]
+        assert "setpriv" in tokens
+        assert "--reuid" in tokens
+        assert tokens[tokens.index("--reuid") + 1] == "1001"
+        assert "--regid" in tokens
+        assert tokens[tokens.index("--regid") + 1] == "1001"
+        assert "--clear-groups" in tokens
+        assert "--inh-caps=-all,+net_raw" in tokens
+        assert "--ambient-caps=-all,+net_raw" in tokens
+        assert "--bounding-set=-all,+net_raw" in tokens
+        assert "--no-new-privs" in tokens
+
+        sep = tokens.index("--")
+        shell_cmd = tokens[sep + 3]
+        assert tokens[sep + 1:sep + 3] == ["sh", "-c"]
+        assert shell_cmd.startswith(f"cd {shlex.quote(ws)} && ")
+        assert "setuid sandbox workspace is not writable by exec UID/GID 1001:1001" in shell_cmd
+        assert "adjust the host bind-mount ownership" in shell_cmd
+        assert f"python -m venv {shlex.quote(str(tmp_path / 'project' / '.venv'))}" in shell_cmd
+        assert "failed to create workspace venv as exec UID/GID 1001:1001" in shell_cmd
+        assert f"export PATH={shlex.quote(str(tmp_path / 'project' / '.venv' / 'bin'))}:" in shell_cmd
+        assert shell_cmd.endswith(" && id")
+
+    def test_custom_uid_defaults_gid_to_uid(self, tmp_path):
+        ws = str(tmp_path / "project")
+        result = wrap_command("setuid:2000", "id", ws, ws)
+        tokens = _parse(result)
+
+        assert tokens[tokens.index("--reuid") + 1] == "2000"
+        assert tokens[tokens.index("--regid") + 1] == "2000"
+
+    def test_custom_uid_gid(self, tmp_path):
+        ws = str(tmp_path / "project")
+        result = wrap_command("setuid:2000:3000", "id", ws, ws)
+        tokens = _parse(result)
+
+        assert tokens[tokens.index("--reuid") + 1] == "2000"
+        assert tokens[tokens.index("--regid") + 1] == "3000"
+
+    def test_cwd_inside_workspace(self, tmp_path):
+        ws = tmp_path / "project"
+        sub = ws / "src" / "lib"
+        result = wrap_command("setuid:2000:3000", "pwd", str(ws), str(sub))
+        tokens = _parse(result)
+
+        sep = tokens.index("--")
+        assert tokens[sep + 3].startswith(f"cd {shlex.quote(str(sub))} && ")
+        assert f"python -m venv {shlex.quote(str(ws / '.venv'))}" in tokens[sep + 3]
+        assert tokens[sep + 3].endswith(" && pwd")
+
+    def test_cwd_outside_workspace_falls_back(self, tmp_path):
+        ws = tmp_path / "project"
+        outside = tmp_path / "other"
+        result = wrap_command("setuid:2000:3000", "pwd", str(ws), str(outside))
+        tokens = _parse(result)
+
+        sep = tokens.index("--")
+        assert tokens[sep + 3].startswith(f"cd {shlex.quote(str(ws.resolve()))} && ")
+        assert f"python -m venv {shlex.quote(str(ws.resolve() / '.venv'))}" in tokens[sep + 3]
+        assert tokens[sep + 3].endswith(" && pwd")
+
+    def test_invalid_uid_spec_rejected(self, tmp_path):
+        ws = str(tmp_path / "project")
+        with pytest.raises(ValueError, match="Unknown sandbox backend"):
+            wrap_command("setuid:nanobot", "id", ws, ws)
+
+    @pytest.mark.parametrize("sandbox", ["setuid:0", "setuid:1001:0"])
+    def test_root_uid_or_gid_rejected(self, tmp_path, sandbox):
+        ws = str(tmp_path / "project")
+        with pytest.raises(ValueError, match="non-root"):
+            wrap_command(sandbox, "id", ws, ws)
+
+    def test_oversized_uid_rejected(self, tmp_path):
+        ws = str(tmp_path / "project")
+        with pytest.raises(ValueError, match="between 1 and"):
+            wrap_command("setuid:2147483648", "id", ws, ws)
+
+
 class TestUnknownBackend:
     def test_raises_value_error(self, tmp_path):
         ws = str(tmp_path / "project")
