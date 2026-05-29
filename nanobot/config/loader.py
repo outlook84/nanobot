@@ -81,6 +81,7 @@ def save_config(config: Config, config_path: Path | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
     data = config.model_dump(mode="json", by_alias=True)
+    _serialize_provider_aliases(data, config)
 
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
@@ -176,3 +177,19 @@ def _migrate_config(data: dict) -> dict:
             tools.pop("mySet", None)
 
     return data
+
+
+def _serialize_provider_aliases(data: dict, config: Config) -> None:
+    """Serialize aliases as explicit overlays instead of expanded provider configs."""
+    data.pop("provider_aliases", None)
+    data.pop("providerAliases", None)
+    if not config.provider_aliases:
+        return
+    data["providerAliases"] = {
+        name: alias.model_dump(
+            mode="json",
+            by_alias=True,
+            exclude_unset=True,
+        )
+        for name, alias in config.provider_aliases.items()
+    }

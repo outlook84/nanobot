@@ -297,6 +297,11 @@ export interface SettingsPayload {
     region?: string | null;
     profile?: string | null;
   }>;
+  model_provider_options?: Array<{
+    name: string;
+    label: string;
+    alias_of?: string | null;
+  }>;
   web_search: {
     provider: string;
     api_key_hint?: string | null;

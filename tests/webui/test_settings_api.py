@@ -200,6 +200,96 @@ def test_settings_payload_uses_provider_registry_config_fields(
     assert rows["bedrock"]["profile"] == "work"
 
 
+def test_settings_payload_includes_configured_provider_alias(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.json"
+    config = Config.model_validate({
+        "providers": {
+            "openai": {
+                "apiKey": "sk-test",
+                "apiBase": "https://api.openai.com/v1",
+            },
+        },
+        "providerAliases": {
+            "openai-images": {
+                "provider": "openai",
+                "apiBase": "https://images.example.test/v1",
+            },
+        },
+    })
+    save_config(config, config_path)
+    monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
+
+    payload = settings_payload()
+    rows = {row["name"]: row for row in payload["providers"]}
+    options = {row["name"]: row for row in payload["model_provider_options"]}
+
+    assert "openai-images" not in rows
+    assert options["openai-images"]["alias_of"] == "openai"
+    assert options["openai-images"]["label"] == "openai-images (OpenAI)"
+
+
+def test_update_agent_settings_accepts_configured_provider_alias(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.json"
+    config = Config.model_validate({
+        "providers": {
+            "openai": {"apiKey": "sk-test"},
+        },
+        "providerAliases": {
+            "openai-fast": {
+                "provider": "openai",
+            },
+        },
+    })
+    save_config(config, config_path)
+    monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
+
+    payload = update_agent_settings({"provider": ["openai-fast"]})
+    saved = load_config(config_path)
+
+    assert payload["agent"]["provider"] == "openai-fast"
+    assert payload["agent"]["resolved_provider"] == "openai"
+    assert saved.agents.defaults.provider == "openai-fast"
+
+
+def test_create_model_configuration_accepts_provider_alias(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.json"
+    config = Config.model_validate({
+        "providers": {
+            "openai": {"apiKey": "sk-test"},
+        },
+        "providerAliases": {
+            "openai-fast": {
+                "provider": "openai",
+            },
+        },
+    })
+    save_config(config, config_path)
+    monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
+
+    payload = create_model_configuration(
+        {
+            "label": ["Fast alias"],
+            "provider": ["openai-fast"],
+            "model": ["gpt-4.1-mini"],
+        }
+    )
+
+    assert payload["agent"]["model_preset"] == "fast-alias"
+    assert payload["agent"]["provider"] == "openai-fast"
+
+    saved = load_config(config_path)
+    assert saved.model_presets["fast-alias"].provider == "openai-fast"
+
+
 def test_update_model_configuration_rejects_default_preset(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,

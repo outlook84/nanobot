@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
@@ -455,6 +456,25 @@ def provider_models_payload(query: QueryParams) -> dict[str, Any]:
     }
 
 
+def _selected_provider_for_settings(config: Any, provider_name: str) -> str:
+    if provider_name == "auto" or provider_name in config.provider_aliases:
+        return provider_name
+    spec = find_by_name(provider_name)
+    return spec.name if spec else provider_name
+
+
+def _provider_config_for_agent_settings(config: Any, provider_name: str) -> tuple[Any, Any]:
+    if provider_name in config.provider_aliases:
+        provider_ref = config._resolve_provider_alias(provider_name)
+        if provider_ref is None:
+            return None, None
+        return provider_ref.spec, provider_ref.config
+    spec = find_by_name(provider_name)
+    if spec is None:
+        return None, None
+    return spec, getattr(config.providers, spec.name, None)
+
+
 def _parse_bool(value: str, field: str) -> bool:
     normalized = value.strip().lower()
     if normalized not in {"1", "0", "true", "false", "yes", "no"}:
@@ -489,15 +509,78 @@ def _model_configuration_slug(label: str) -> str:
 def _validate_configured_provider(config: Any, provider: str) -> None:
     if provider == "auto":
         return
-    spec = find_by_name(provider)
+    spec, provider_config = _provider_config_for_agent_settings(config, provider)
     if spec is None:
         raise WebUISettingsError("unknown provider")
-    provider_config = getattr(config.providers, spec.name, None)
     if (
         provider_config is None
         or not _provider_configured_for_settings(spec, provider_config)
     ):
         raise WebUISettingsError("provider is not configured")
+
+
+def _provider_settings_row(
+    *,
+    name: str,
+    spec: Any,
+    provider_config: Any,
+    oauth_status: dict[str, Any] | None = None,
+    label: str | None = None,
+) -> dict[str, Any]:
+    row = {
+        "name": name,
+        "label": label or spec.label,
+        "configured": (
+            bool(oauth_status["configured"])
+            if oauth_status is not None
+            else _provider_configured_for_settings(spec, provider_config)
+        ),
+        "auth_type": "oauth" if spec.is_oauth else "api_key",
+        "api_key_required": _provider_requires_api_key(spec),
+        "api_key_hint": _mask_secret_hint(provider_config.api_key),
+        "api_base": provider_config.api_base,
+        "default_api_base": spec.default_api_base or None,
+        "config_fields": list(spec.config_fields),
+    }
+    if oauth_status is not None:
+        row["oauth_account"] = oauth_status["account"]
+        row["oauth_expires_at"] = oauth_status["expires_at"]
+        row["oauth_login_supported"] = oauth_status["login_supported"]
+    if spec.supports_config_field("api_type"):
+        row["api_type"] = provider_config.api_type
+    if spec.supports_config_field("region"):
+        row["region"] = getattr(provider_config, "region", None)
+    if spec.supports_config_field("profile"):
+        row["profile"] = getattr(provider_config, "profile", None)
+    return row
+
+
+def _model_provider_option_rows(
+    config: Any,
+    provider_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    rows = [
+        {
+            "name": row["name"],
+            "label": row["label"],
+        }
+        for row in provider_rows
+        if row["configured"] or row.get("auth_type") == "oauth"
+    ]
+    for alias_name in config.provider_aliases:
+        provider_ref = config._resolve_provider_alias(alias_name)
+        if provider_ref is None or provider_ref.spec is None or provider_ref.config is None:
+            continue
+        if not _provider_configured_for_settings(provider_ref.spec, provider_ref.config):
+            continue
+        rows.append(
+            {
+                "name": alias_name,
+                "label": f"{alias_name} ({provider_ref.spec.label})",
+                "alias_of": provider_ref.name,
+            }
+        )
+    return rows
 
 
 def _image_generation_provider_rows(config: Any) -> list[dict[str, Any]]:
@@ -552,8 +635,7 @@ def settings_payload(
     provider = config.get_provider(effective_preset.model, preset=effective_preset)
     selected_provider = provider_name
     if effective_preset.provider != "auto":
-        spec = find_by_name(effective_preset.provider)
-        selected_provider = spec.name if spec else provider_name
+        selected_provider = _selected_provider_for_settings(config, effective_preset.provider)
 
     providers = []
     for spec in PROVIDERS:
@@ -561,32 +643,16 @@ def settings_payload(
         if provider_config is None:
             continue
         oauth_status = oauth_provider_status(spec) if spec.is_oauth else None
-        row = {
-            "name": spec.name,
-            "label": spec.label,
-            "configured": (
-                bool(oauth_status["configured"])
-                if oauth_status is not None
-                else _provider_configured_for_settings(spec, provider_config)
-            ),
-            "auth_type": "oauth" if spec.is_oauth else "api_key",
-            "api_key_required": _provider_requires_api_key(spec),
-            "api_key_hint": _mask_secret_hint(provider_config.api_key),
-            "api_base": provider_config.api_base,
-            "default_api_base": spec.default_api_base or None,
-            "config_fields": list(spec.config_fields),
-        }
-        if oauth_status is not None:
-            row["oauth_account"] = oauth_status["account"]
-            row["oauth_expires_at"] = oauth_status["expires_at"]
-            row["oauth_login_supported"] = oauth_status["login_supported"]
-        if spec.supports_config_field("api_type"):
-            row["api_type"] = provider_config.api_type
-        if spec.supports_config_field("region"):
-            row["region"] = getattr(provider_config, "region", None)
-        if spec.supports_config_field("profile"):
-            row["profile"] = getattr(provider_config, "profile", None)
-        providers.append(row)
+        providers.append(
+            _provider_settings_row(
+                name=spec.name,
+                spec=spec,
+                provider_config=provider_config,
+                oauth_status=oauth_status,
+            )
+        )
+
+    model_provider_options = _model_provider_option_rows(config, providers)
 
     search_config = config.tools.web.search
     image_config = config.tools.image_generation
@@ -657,6 +723,7 @@ def settings_payload(
         },
         "model_presets": model_presets,
         "providers": providers,
+        "model_provider_options": model_provider_options,
         "web_search": {
             "provider": search_provider,
             "api_key_hint": _mask_secret_hint(search_config.api_key),

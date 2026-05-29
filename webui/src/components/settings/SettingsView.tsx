@@ -174,6 +174,7 @@ type ProviderForm = {
   region: string;
   profile: string;
 };
+type ProviderPickerOption = { name: string; label: string; alias_of?: string | null };
 type CustomMcpTransport = "stdio" | "streamableHttp" | "sse";
 
 const NANOBOT_ICON_SRC = "/brand/nanobot_icon.png";
@@ -369,6 +370,18 @@ function normalizeContextWindowTokens(value: number | null | undefined): number 
 function editableDefaultProvider(payload: SettingsPayload): string {
   const base = defaultPreset(payload);
   return base?.provider ?? payload.agent.provider ?? payload.agent.resolved_provider ?? "";
+}
+
+function modelProviderOptions(payload: SettingsPayload): ProviderPickerOption[] {
+  return payload.model_provider_options ?? payload.providers;
+}
+
+function saveableModelProviderOptions(payload: SettingsPayload): ProviderPickerOption[] {
+  const builtIn = payload.providers
+    .filter((provider) => provider.configured)
+    .map((provider) => ({ name: provider.name, label: provider.label }));
+  const aliases = modelProviderOptions(payload).filter((provider) => provider.alias_of);
+  return uniqueProviders([...builtIn, ...aliases]);
 }
 
 export function SettingsView({
@@ -658,10 +671,7 @@ export function SettingsView({
   }, [networkSafetyForm, settings]);
 
   const configuredModelProviderOptions = useMemo(
-    () =>
-      settings?.providers
-        .filter((provider) => provider.configured)
-        .map((provider) => ({ name: provider.name, label: provider.label })) ?? [],
+    () => (settings ? saveableModelProviderOptions(settings) : []),
     [settings],
   );
 
@@ -1811,7 +1821,7 @@ function NewModelConfigurationDialog({
 }: {
   open: boolean;
   draft: ModelConfigurationDraft;
-  providers: Array<{ name: string; label: string }>;
+  providers: ProviderPickerOption[];
   saving: boolean;
   showProviderLogos: boolean;
   onOpenChange: (open: boolean) => void;
@@ -1942,10 +1952,8 @@ function ModelsSettings({
 }) {
   const { t } = useTranslation();
   const tx = (key: string, fallback: string) => t(key, { defaultValue: fallback });
-  const configuredProviders = settings.providers.filter((provider) => provider.configured);
-  const oauthProviders = settings.providers.filter((provider) => provider.auth_type === "oauth");
   const showAutoProvider = defaultPreset(settings)?.provider === "auto" || form.provider === "auto";
-  const selectableProviders = uniqueProviders([...configuredProviders, ...oauthProviders]);
+  const selectableProviders = uniqueProviders(modelProviderOptions(settings));
   const providerOptions = showAutoProvider
     ? [{ name: "auto", label: tx("settings.values.auto", "Auto") }, ...selectableProviders]
     : selectableProviders;
@@ -2148,10 +2156,11 @@ function ProvidersSettings({
 }) {
   const { t } = useTranslation();
   const tx = (key: string, fallback: string) => t(key, { defaultValue: fallback });
-  const configuredProviders = settings.providers.filter((provider) => provider.configured);
+  const credentialProviders = useMemo(() => settings.providers, [settings.providers]);
+  const configuredProviders = credentialProviders.filter((provider) => provider.configured);
   const unconfiguredProviders = useMemo(
-    () => orderUnconfiguredProviders(settings.providers.filter((provider) => !provider.configured)),
-    [settings.providers],
+    () => orderUnconfiguredProviders(credentialProviders.filter((provider) => !provider.configured)),
+    [credentialProviders],
   );
   const filteredConfigured = filterProviders(configuredProviders, query);
   const filteredUnconfigured = filterProviders(unconfiguredProviders, query);
@@ -4351,7 +4360,7 @@ function ProviderPicker({
   showProviderLogos = false,
   onChange,
 }: {
-  providers: Array<{ name: string; label: string }>;
+  providers: ProviderPickerOption[];
   value: string;
   emptyLabel: string;
   showProviderLogos?: boolean;
@@ -4376,7 +4385,7 @@ function ProviderPicker({
           <span className="flex min-w-0 items-center gap-2">
             {selectedProvider && showProviderLogos ? (
               <ProviderPickerIcon
-                provider={selectedProvider.name}
+                provider={selectedProvider.alias_of ?? selectedProvider.name}
                 showBrandLogos={showProviderLogos}
               />
             ) : null}
@@ -4404,7 +4413,7 @@ function ProviderPicker({
               <span className="flex min-w-0 items-center gap-2">
                 {showProviderLogos ? (
                   <ProviderPickerIcon
-                    provider={provider.name}
+                    provider={provider.alias_of ?? provider.name}
                     showBrandLogos={showProviderLogos}
                   />
                 ) : null}
@@ -4778,8 +4787,8 @@ function orderUnconfiguredProviders(
 }
 
 function uniqueProviders(
-  providers: SettingsPayload["providers"],
-): SettingsPayload["providers"] {
+  providers: ProviderPickerOption[],
+): ProviderPickerOption[] {
   const seen = new Set<string>();
   return providers.filter((provider) => {
     if (seen.has(provider.name)) return false;
@@ -4865,9 +4874,9 @@ function timezoneOffset(timezone: string): string {
 }
 
 function optionRowsWithCurrent(
-  options: Array<{ name: string; label: string }>,
+  options: ProviderPickerOption[],
   value: string,
-): Array<{ name: string; label: string }> {
+): ProviderPickerOption[] {
   if (!value || options.some((option) => option.name === value)) return options;
   return [{ name: value, label: value }, ...options];
 }
@@ -5278,10 +5287,12 @@ function ModelPresetOptionContent({
     draftProvider: preset.is_default ? draftProvider : undefined,
   });
   const model = preset.is_default ? draftModel : preset.model;
-  const providerName = providerDisplayLabel(settings.providers, provider);
+  const providerOptions = modelProviderOptions(settings);
+  const providerName = providerDisplayLabel(providerOptions, provider);
+  const iconProvider = providerOptions.find((row) => row.name === provider)?.alias_of ?? provider;
   return (
     <span className="flex min-w-0 items-center gap-2.5">
-      <ProviderPickerIcon provider={provider} showBrandLogos={showProviderLogos} />
+      <ProviderPickerIcon provider={iconProvider} showBrandLogos={showProviderLogos} />
       <span className="min-w-0 text-left leading-tight">
         <span className="block truncate font-medium text-foreground">{model || preset.label}</span>
         <span

@@ -186,6 +186,14 @@ class BedrockProviderConfig(ProviderConfig):
     profile: str | None = None  # Optional AWS shared config profile
 
 
+class ProviderAliasConfig(ProviderConfig):
+    """Named configuration overlay for a built-in provider."""
+
+    provider: str
+    region: str | None = None
+    profile: str | None = None
+
+
 class ProvidersConfig(Base):
     """Configuration for LLM providers."""
 
@@ -324,6 +332,10 @@ class Config(BaseSettings):
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
+    provider_aliases: dict[str, ProviderAliasConfig] = Field(
+        default_factory=dict,
+        validation_alias=AliasChoices("providerAliases", "provider_aliases"),
+    )
     api: ApiConfig = Field(default_factory=ApiConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
@@ -348,6 +360,58 @@ class Config(BaseSettings):
             if isinstance(fallback, str) and fallback not in self.model_presets:
                 raise ValueError(f"fallback_models entry {fallback!r} not found in model_presets")
         return self
+
+    @model_validator(mode="after")
+    def _validate_provider_aliases(self) -> "Config":
+        from nanobot.providers.registry import find_by_name
+
+        for alias_name, alias in self.provider_aliases.items():
+            if alias_name == "auto" or find_by_name(alias_name):
+                raise ValueError(f"provider_aliases entry {alias_name!r} conflicts with a built-in provider")
+            if alias.provider in self.provider_aliases:
+                raise ValueError(f"provider_aliases entry {alias_name!r} cannot target another alias")
+            spec = find_by_name(alias.provider)
+            if spec is None:
+                raise ValueError(f"provider_aliases entry {alias_name!r} targets unknown provider {alias.provider!r}")
+            if spec.is_oauth:
+                raise ValueError(f"provider_aliases entry {alias_name!r} cannot target OAuth provider {spec.name!r}")
+            for field in self._provider_alias_override_fields(alias):
+                if not spec.supports_config_field(field):
+                    raise ValueError(
+                        f"provider_aliases.{alias_name}.{field} is not supported for provider {spec.name!r}"
+                    )
+        return self
+
+    @staticmethod
+    def _provider_alias_override_fields(alias: ProviderAliasConfig) -> set[str]:
+        fields = set(alias.model_fields_set)
+        fields.discard("provider")
+        return fields
+
+    def _resolve_provider_alias(self, alias_name: str) -> "ProviderResolution | None":
+        alias = self.provider_aliases.get(alias_name)
+        if alias is None:
+            return None
+
+        from nanobot.providers.registry import ProviderResolution, find_by_name
+
+        spec = find_by_name(alias.provider)
+        if spec is None:
+            return None
+        base = getattr(self.providers, spec.name, None)
+        if base is None:
+            return None
+        overrides = {
+            field: getattr(alias, field)
+            for field in self._provider_alias_override_fields(alias)
+            if field in type(base).model_fields
+        }
+        return ProviderResolution(
+            requested_name=alias_name,
+            name=spec.name,
+            spec=spec,
+            config=base.model_copy(update=overrides),
+        )
 
     def resolve_default_preset(self) -> ModelPresetConfig:
         """Return the implicit `default` preset from agents.defaults fields."""
@@ -384,6 +448,9 @@ class Config(BaseSettings):
         resolved = preset or self.resolve_preset()
         forced = resolved.provider
         if forced != "auto":
+            alias_ref = self._resolve_provider_alias(forced)
+            if alias_ref is not None:
+                return alias_ref
             spec = find_by_name(forced)
             if spec:
                 p = getattr(self.providers, spec.name, None)

@@ -177,6 +177,76 @@ def test_provider_signature_tracks_fallback_presets_and_provider_config() -> Non
     assert signature != provider_signature(Config.model_validate(changed_key))
 
 
+def test_provider_signature_tracks_provider_alias_config() -> None:
+    from nanobot.config.schema import Config
+    from nanobot.providers.factory import provider_signature
+
+    base = {
+        "agents": {
+            "defaults": {
+                "model": "gpt-5.1",
+                "provider": "custom-image-provider",
+            }
+        },
+        "providers": {
+            "openai": {"apiKey": "base-key"},
+        },
+        "providerAliases": {
+            "custom-image-provider": {
+                "provider": "openai",
+                "apiKey": "alias-key",
+                "apiBase": "https://api.example.test/v1",
+            },
+        },
+    }
+    changed_alias = {
+        **base,
+        "providerAliases": {
+            "custom-image-provider": {
+                "provider": "openai",
+                "apiKey": "alias-key",
+                "apiBase": "https://api-changed.example.test/v1",
+            },
+        },
+    }
+
+    assert provider_signature(Config.model_validate(base)) != provider_signature(Config.model_validate(changed_alias))
+
+
+def test_make_provider_uses_provider_alias_backend_config() -> None:
+    from nanobot.config.schema import Config
+    from nanobot.providers.factory import make_provider
+
+    config = Config.model_validate({
+        "agents": {
+            "defaults": {
+                "model": "gpt-5.1",
+                "provider": "custom-image-provider",
+            }
+        },
+        "providers": {
+            "openai": {"apiKey": "base-key"},
+        },
+        "providerAliases": {
+            "custom-image-provider": {
+                "provider": "openai",
+                "apiKey": "alias-key",
+                "apiBase": "https://api.example.test/v1",
+                "apiType": "responses",
+                "extraBody": {"tools": [{"type": "image_generation"}]},
+            },
+        },
+    })
+
+    with patch("nanobot.providers.openai_compat_provider.AsyncOpenAI"):
+        provider = make_provider(config)
+
+    assert provider.api_key == "alias-key"
+    assert provider.api_base == "https://api.example.test/v1"
+    assert provider._api_type == "responses"
+    assert provider._extra_body == {"tools": [{"type": "image_generation"}]}
+
+
 def test_provider_snapshot_uses_smallest_fallback_context_window() -> None:
     from nanobot.config.schema import Config
     from nanobot.providers.factory import build_provider_snapshot
