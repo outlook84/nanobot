@@ -3,7 +3,7 @@ FROM oven/bun:1-alpine AS webui-build
 WORKDIR /src
 COPY webui/ webui/
 COPY nanobot/web/ nanobot/web/
-RUN cd webui && bun install --frozen-lockfile && bun run build
+RUN cd webui && bun install && bun run build
 
 
 FROM ghcr.io/astral-sh/uv:python3.12-alpine AS python-build
