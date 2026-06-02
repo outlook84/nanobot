@@ -7,17 +7,18 @@ import pytest
 
 from nanobot.config.loader import load_config, save_config
 from nanobot.config.schema import Config, ModelPresetConfig
+from nanobot.providers.oauth import oauth_provider_status
+from nanobot.providers.registry import find_by_name
 from nanobot.webui.settings_api import (
     WebUISettingsError,
-    _oauth_provider_status,
     create_model_configuration,
     provider_models_payload,
     settings_payload,
     update_agent_settings,
     update_model_configuration,
     update_network_safety_settings,
+    update_provider_settings,
 )
-from nanobot.providers.registry import find_by_name
 
 
 def test_create_model_configuration_writes_label_and_selects(
@@ -95,7 +96,7 @@ def test_update_model_configuration_edits_named_preset_and_selects(
     save_config(config, config_path)
     monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
     monkeypatch.setattr(
-        "nanobot.webui.settings_api._oauth_provider_status",
+        "nanobot.webui.settings_api.oauth_provider_status",
         lambda spec: {
             "configured": spec.name == "openai_codex",
             "account": "acct-test",
@@ -176,6 +177,119 @@ def test_update_context_window_rejects_unknown_values(
         update_agent_settings({"context_window_tokens": ["128000"]})
 
 
+def test_settings_payload_uses_provider_registry_config_fields(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.json"
+    config = Config.model_validate({
+        "providers": {
+            "openai": {"apiKey": "sk-test", "apiType": "responses"},
+            "bedrock": {"region": "us-east-1", "profile": "work"},
+        }
+    })
+    save_config(config, config_path)
+    monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
+
+    rows = {row["name"]: row for row in settings_payload()["providers"]}
+
+    assert rows["openai"]["config_fields"] == ["api_type"]
+    assert rows["openai"]["api_type"] == "responses"
+    assert rows["bedrock"]["config_fields"] == ["region", "profile"]
+    assert rows["bedrock"]["region"] == "us-east-1"
+    assert rows["bedrock"]["profile"] == "work"
+
+
+def test_settings_payload_includes_configured_provider_alias(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.json"
+    config = Config.model_validate({
+        "providers": {
+            "openai": {
+                "apiKey": "sk-test",
+                "apiBase": "https://api.openai.com/v1",
+            },
+        },
+        "providerAliases": {
+            "openai-images": {
+                "provider": "openai",
+                "apiBase": "https://images.example.test/v1",
+            },
+        },
+    })
+    save_config(config, config_path)
+    monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
+
+    payload = settings_payload()
+    rows = {row["name"]: row for row in payload["providers"]}
+    options = {row["name"]: row for row in payload["model_provider_options"]}
+
+    assert "openai-images" not in rows
+    assert options["openai-images"]["alias_of"] == "openai"
+    assert options["openai-images"]["label"] == "openai-images (OpenAI)"
+
+
+def test_update_agent_settings_accepts_configured_provider_alias(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.json"
+    config = Config.model_validate({
+        "providers": {
+            "openai": {"apiKey": "sk-test"},
+        },
+        "providerAliases": {
+            "openai-fast": {
+                "provider": "openai",
+            },
+        },
+    })
+    save_config(config, config_path)
+    monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
+
+    payload = update_agent_settings({"provider": ["openai-fast"]})
+    saved = load_config(config_path)
+
+    assert payload["agent"]["provider"] == "openai-fast"
+    assert payload["agent"]["resolved_provider"] == "openai"
+    assert saved.agents.defaults.provider == "openai-fast"
+
+
+def test_create_model_configuration_accepts_provider_alias(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.json"
+    config = Config.model_validate({
+        "providers": {
+            "openai": {"apiKey": "sk-test"},
+        },
+        "providerAliases": {
+            "openai-fast": {
+                "provider": "openai",
+            },
+        },
+    })
+    save_config(config, config_path)
+    monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
+
+    payload = create_model_configuration(
+        {
+            "label": ["Fast alias"],
+            "provider": ["openai-fast"],
+            "model": ["gpt-4.1-mini"],
+        }
+    )
+
+    assert payload["agent"]["model_preset"] == "fast-alias"
+    assert payload["agent"]["provider"] == "openai-fast"
+
+    saved = load_config(config_path)
+    assert saved.model_presets["fast-alias"].provider == "openai-fast"
+
+
 def test_update_model_configuration_rejects_default_preset(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
@@ -186,6 +300,25 @@ def test_update_model_configuration_rejects_default_preset(
 
     with pytest.raises(WebUISettingsError, match="model configuration is required"):
         update_model_configuration({"name": ["default"], "model": ["openai/gpt-4.1"]})
+
+
+def test_update_provider_settings_uses_registry_config_fields(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "config.json"
+    save_config(Config(), config_path)
+    monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
+
+    update_provider_settings({
+        "provider": ["bedrock"],
+        "region": ["us-west-2"],
+        "profile": ["prod"],
+    })
+
+    saved = load_config(config_path)
+    assert saved.providers.bedrock.region == "us-west-2"
+    assert saved.providers.bedrock.profile == "prod"
 
 
 def test_settings_payload_includes_oauth_provider_status(
@@ -211,7 +344,7 @@ def test_settings_payload_includes_oauth_provider_status(
             "login_supported": True,
         }
 
-    monkeypatch.setattr("nanobot.webui.settings_api._oauth_provider_status", fake_oauth_status)
+    monkeypatch.setattr("nanobot.webui.settings_api.oauth_provider_status", fake_oauth_status)
 
     payload = settings_payload()
     providers = {row["name"]: row for row in payload["providers"]}
@@ -318,7 +451,7 @@ def test_openai_codex_oauth_status_uses_available_token(
 
     monkeypatch.setattr("oauth_cli_kit.get_token", fake_get_token)
 
-    status = _oauth_provider_status(find_by_name("openai_codex"))
+    status = oauth_provider_status(find_by_name("openai_codex"))
 
     assert status["configured"] is True
     assert status["account"] == "acct-codex"
@@ -332,7 +465,7 @@ def test_openai_codex_oauth_status_rejects_unavailable_token(
 
     monkeypatch.setattr("oauth_cli_kit.get_token", fake_get_token)
 
-    status = _oauth_provider_status(find_by_name("openai_codex"))
+    status = oauth_provider_status(find_by_name("openai_codex"))
 
     assert status["configured"] is False
     assert status["account"] is None
@@ -441,7 +574,7 @@ def test_create_model_configuration_accepts_configured_oauth_provider(
     save_config(Config(), config_path)
     monkeypatch.setattr("nanobot.config.loader._current_config_path", config_path)
     monkeypatch.setattr(
-        "nanobot.webui.settings_api._oauth_provider_status",
+        "nanobot.webui.settings_api.oauth_provider_status",
         lambda spec: {
             "configured": spec.name == "openai_codex",
             "account": "acct-test",

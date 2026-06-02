@@ -9,7 +9,6 @@ from __future__ import annotations
 import os
 import re
 import time
-from contextlib import suppress
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
@@ -20,6 +19,12 @@ from nanobot.config.schema import ModelPresetConfig
 from nanobot.providers.image_generation import (
     get_image_gen_provider,
     image_gen_provider_names,
+)
+from nanobot.providers.oauth import (
+    OAuthProviderError,
+    login_oauth_provider as login_provider_oauth,
+    logout_oauth_provider as logout_provider_oauth,
+    oauth_provider_status,
 )
 from nanobot.providers.registry import PROVIDERS, find_by_name
 from nanobot.security.workspace_access import workspace_sandbox_status
@@ -253,57 +258,9 @@ def _provider_requires_api_key(spec: Any) -> bool:
     return True
 
 
-def _oauth_provider_status(spec: Any) -> dict[str, Any]:
-    if not getattr(spec, "is_oauth", False):
-        return {"configured": False, "account": None, "expires_at": None, "login_supported": False}
-
-    if spec.name == "openai_codex":
-        try:
-            from oauth_cli_kit import get_token as get_codex_token
-        except Exception:
-            return {
-                "configured": False,
-                "account": None,
-                "expires_at": None,
-                "login_supported": False,
-            }
-        token = None
-        with suppress(Exception):
-            token = get_codex_token()
-        expires_at = getattr(token, "expires", None) if token else None
-        return {
-            "configured": bool(token and token.access),
-            "account": getattr(token, "account_id", None) if token else None,
-            "expires_at": expires_at,
-            "login_supported": True,
-        }
-
-    if spec.name == "github_copilot":
-        try:
-            from nanobot.providers.github_copilot_provider import get_github_copilot_login_status
-        except Exception:
-            return {
-                "configured": False,
-                "account": None,
-                "expires_at": None,
-                "login_supported": False,
-            }
-        token = None
-        with suppress(Exception):
-            token = get_github_copilot_login_status()
-        return {
-            "configured": bool(token and token.access and token.expires > int(time.time() * 1000)),
-            "account": getattr(token, "account_id", None) if token else None,
-            "expires_at": getattr(token, "expires", None) if token else None,
-            "login_supported": True,
-        }
-
-    return {"configured": False, "account": None, "expires_at": None, "login_supported": False}
-
-
 def _provider_configured_for_settings(spec: Any, provider_config: Any) -> bool:
     if spec.is_oauth:
-        return bool(_oauth_provider_status(spec)["configured"])
+        return bool(oauth_provider_status(spec)["configured"])
     if _provider_requires_api_key(spec):
         return bool(provider_config.api_key)
     return bool(
@@ -499,6 +456,25 @@ def provider_models_payload(query: QueryParams) -> dict[str, Any]:
     }
 
 
+def _selected_provider_for_settings(config: Any, provider_name: str) -> str:
+    if provider_name == "auto" or provider_name in config.provider_aliases:
+        return provider_name
+    spec = find_by_name(provider_name)
+    return spec.name if spec else provider_name
+
+
+def _provider_config_for_agent_settings(config: Any, provider_name: str) -> tuple[Any, Any]:
+    if provider_name in config.provider_aliases:
+        provider_ref = config._resolve_provider_alias(provider_name)
+        if provider_ref is None:
+            return None, None
+        return provider_ref.spec, provider_ref.config
+    spec = find_by_name(provider_name)
+    if spec is None:
+        return None, None
+    return spec, getattr(config.providers, spec.name, None)
+
+
 def _parse_bool(value: str, field: str) -> bool:
     normalized = value.strip().lower()
     if normalized not in {"1", "0", "true", "false", "yes", "no"}:
@@ -533,15 +509,78 @@ def _model_configuration_slug(label: str) -> str:
 def _validate_configured_provider(config: Any, provider: str) -> None:
     if provider == "auto":
         return
-    spec = find_by_name(provider)
+    spec, provider_config = _provider_config_for_agent_settings(config, provider)
     if spec is None:
         raise WebUISettingsError("unknown provider")
-    provider_config = getattr(config.providers, provider, None)
     if (
         provider_config is None
         or not _provider_configured_for_settings(spec, provider_config)
     ):
         raise WebUISettingsError("provider is not configured")
+
+
+def _provider_settings_row(
+    *,
+    name: str,
+    spec: Any,
+    provider_config: Any,
+    oauth_status: dict[str, Any] | None = None,
+    label: str | None = None,
+) -> dict[str, Any]:
+    row = {
+        "name": name,
+        "label": label or spec.label,
+        "configured": (
+            bool(oauth_status["configured"])
+            if oauth_status is not None
+            else _provider_configured_for_settings(spec, provider_config)
+        ),
+        "auth_type": "oauth" if spec.is_oauth else "api_key",
+        "api_key_required": _provider_requires_api_key(spec),
+        "api_key_hint": _mask_secret_hint(provider_config.api_key),
+        "api_base": provider_config.api_base,
+        "default_api_base": spec.default_api_base or None,
+        "config_fields": list(spec.config_fields),
+    }
+    if oauth_status is not None:
+        row["oauth_account"] = oauth_status["account"]
+        row["oauth_expires_at"] = oauth_status["expires_at"]
+        row["oauth_login_supported"] = oauth_status["login_supported"]
+    if spec.supports_config_field("api_type"):
+        row["api_type"] = provider_config.api_type
+    if spec.supports_config_field("region"):
+        row["region"] = getattr(provider_config, "region", None)
+    if spec.supports_config_field("profile"):
+        row["profile"] = getattr(provider_config, "profile", None)
+    return row
+
+
+def _model_provider_option_rows(
+    config: Any,
+    provider_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    rows = [
+        {
+            "name": row["name"],
+            "label": row["label"],
+        }
+        for row in provider_rows
+        if row["configured"] or row.get("auth_type") == "oauth"
+    ]
+    for alias_name in config.provider_aliases:
+        provider_ref = config._resolve_provider_alias(alias_name)
+        if provider_ref is None or provider_ref.spec is None or provider_ref.config is None:
+            continue
+        if not _provider_configured_for_settings(provider_ref.spec, provider_ref.config):
+            continue
+        rows.append(
+            {
+                "name": alias_name,
+                "label": f"{alias_name} ({provider_ref.spec.label})",
+                "alias_of": provider_ref.name,
+            }
+        )
+    return rows
 
 
 def _image_generation_provider_rows(config: Any) -> list[dict[str, Any]]:
@@ -596,36 +635,24 @@ def settings_payload(
     provider = config.get_provider(effective_preset.model, preset=effective_preset)
     selected_provider = provider_name
     if effective_preset.provider != "auto":
-        spec = find_by_name(effective_preset.provider)
-        selected_provider = spec.name if spec else provider_name
+        selected_provider = _selected_provider_for_settings(config, effective_preset.provider)
 
     providers = []
     for spec in PROVIDERS:
         provider_config = getattr(config.providers, spec.name, None)
         if provider_config is None:
             continue
-        oauth_status = _oauth_provider_status(spec) if spec.is_oauth else None
-        row = {
-            "name": spec.name,
-            "label": spec.label,
-            "configured": (
-                bool(oauth_status["configured"])
-                if oauth_status is not None
-                else _provider_configured_for_settings(spec, provider_config)
-            ),
-            "auth_type": "oauth" if spec.is_oauth else "api_key",
-            "api_key_required": _provider_requires_api_key(spec),
-            "api_key_hint": _mask_secret_hint(provider_config.api_key),
-            "api_base": provider_config.api_base,
-            "default_api_base": spec.default_api_base or None,
-        }
-        if oauth_status is not None:
-            row["oauth_account"] = oauth_status["account"]
-            row["oauth_expires_at"] = oauth_status["expires_at"]
-            row["oauth_login_supported"] = oauth_status["login_supported"]
-        if spec.name == "openai":
-            row["api_type"] = provider_config.api_type
-        providers.append(row)
+        oauth_status = oauth_provider_status(spec) if spec.is_oauth else None
+        providers.append(
+            _provider_settings_row(
+                name=spec.name,
+                spec=spec,
+                provider_config=provider_config,
+                oauth_status=oauth_status,
+            )
+        )
+
+    model_provider_options = _model_provider_option_rows(config, providers)
 
     search_config = config.tools.web.search
     image_config = config.tools.image_generation
@@ -696,6 +723,7 @@ def settings_payload(
         },
         "model_presets": model_presets,
         "providers": providers,
+        "model_provider_options": model_provider_options,
         "web_search": {
             "provider": search_provider,
             "api_key_hint": _mask_secret_hint(search_config.api_key),
@@ -990,7 +1018,7 @@ def update_provider_settings(query: QueryParams) -> dict[str, Any]:
             changed = True
 
     if "api_type" in query:
-        if spec.name == "openai":
+        if spec.supports_config_field("api_type"):
             api_type = (_query_first(query, "api_type") or "").strip()
             try:
                 parsed_api_type = type(provider_config)(api_type=api_type).api_type
@@ -999,6 +1027,18 @@ def update_provider_settings(query: QueryParams) -> dict[str, Any]:
             if provider_config.api_type != parsed_api_type:
                 provider_config.api_type = parsed_api_type
                 changed = True
+
+    if "region" in query and spec.supports_config_field("region"):
+        region = (_query_first(query, "region") or "").strip() or None
+        if getattr(provider_config, "region", None) != region:
+            provider_config.region = region
+            changed = True
+
+    if "profile" in query and spec.supports_config_field("profile"):
+        profile = (_query_first(query, "profile") or "").strip() or None
+        if getattr(provider_config, "profile", None) != profile:
+            provider_config.profile = profile
+            changed = True
 
     if changed:
         save_config(config)
@@ -1020,42 +1060,11 @@ def login_oauth_provider(query: QueryParams) -> dict[str, Any]:
     if spec is None or not spec.is_oauth:
         raise WebUISettingsError("unknown OAuth provider")
 
-    if spec.name == "openai_codex":
-        try:
-            from oauth_cli_kit import get_token, login_oauth_interactive
-        except ImportError:
-            raise WebUISettingsError("oauth_cli_kit is not installed", status=500) from None
-
-        token = None
-        with suppress(Exception):
-            token = get_token()
-        if not (token and token.access):
-            messages: list[str] = []
-            token = login_oauth_interactive(
-                print_fn=lambda message: messages.append(str(message)),
-                prompt_fn=lambda _prompt: "",
-            )
-        if not (token and token.access):
-            raise WebUISettingsError("OAuth login failed", status=401)
-        return settings_payload()
-
-    if spec.name == "github_copilot":
-        try:
-            from nanobot.providers.github_copilot_provider import (
-                get_github_copilot_login_status,
-                login_github_copilot,
-            )
-        except ImportError:
-            raise WebUISettingsError("GitHub Copilot OAuth support is unavailable", status=500) from None
-
-        token = get_github_copilot_login_status()
-        if not token:
-            token = login_github_copilot(print_fn=lambda _message: None)
-        if not (token and token.access):
-            raise WebUISettingsError("OAuth login failed", status=401)
-        return settings_payload()
-
-    raise WebUISettingsError("OAuth login is not supported for this provider")
+    try:
+        login_provider_oauth(spec)
+    except OAuthProviderError as exc:
+        raise WebUISettingsError(exc.message, status=exc.status) from exc
+    return settings_payload()
 
 
 def logout_oauth_provider(query: QueryParams) -> dict[str, Any]:
@@ -1066,25 +1075,10 @@ def logout_oauth_provider(query: QueryParams) -> dict[str, Any]:
     if spec is None or not spec.is_oauth:
         raise WebUISettingsError("unknown OAuth provider")
 
-    if spec.name == "openai_codex":
-        try:
-            from oauth_cli_kit.providers import OPENAI_CODEX_PROVIDER
-            from oauth_cli_kit.storage import FileTokenStorage
-        except ImportError:
-            raise WebUISettingsError("oauth_cli_kit is not installed", status=500) from None
-        token_path = FileTokenStorage(token_filename=OPENAI_CODEX_PROVIDER.token_filename).get_token_path()
-    elif spec.name == "github_copilot":
-        try:
-            from nanobot.providers.github_copilot_provider import get_storage
-        except ImportError:
-            raise WebUISettingsError("GitHub Copilot OAuth support is unavailable", status=500) from None
-        token_path = get_storage().get_token_path()
-    else:
-        raise WebUISettingsError("OAuth logout is not supported for this provider")
-
-    for path in (token_path, token_path.with_suffix(".lock")):
-        with suppress(FileNotFoundError):
-            path.unlink()
+    try:
+        logout_provider_oauth(spec)
+    except OAuthProviderError as exc:
+        raise WebUISettingsError(exc.message, status=exc.status) from exc
     return settings_payload()
 
 

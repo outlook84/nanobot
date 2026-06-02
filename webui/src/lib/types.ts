@@ -289,10 +289,18 @@ export interface SettingsPayload {
     api_key_hint?: string | null;
     api_base?: string | null;
     default_api_base?: string | null;
+    config_fields?: string[];
     api_type?: "auto" | "chat_completions" | "responses";
     oauth_account?: string | null;
     oauth_expires_at?: number | null;
     oauth_login_supported?: boolean;
+    region?: string | null;
+    profile?: string | null;
+  }>;
+  model_provider_options?: Array<{
+    name: string;
+    label: string;
+    alias_of?: string | null;
   }>;
   web_search: {
     provider: string;
@@ -567,6 +575,8 @@ export interface ProviderSettingsUpdate {
   apiKey?: string;
   apiBase?: string;
   apiType?: "auto" | "chat_completions" | "responses";
+  region?: string;
+  profile?: string;
 }
 
 export interface WebSearchSettingsUpdate {

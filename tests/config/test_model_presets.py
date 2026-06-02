@@ -1,5 +1,8 @@
+import json
+
 import pytest
 
+from nanobot.config.loader import load_config, save_config
 from nanobot.config.schema import Config
 
 
@@ -36,8 +39,8 @@ def test_provider_api_type_accepts_exact_values_only() -> None:
         })
 
 
-def test_provider_api_type_is_openai_only() -> None:
-    with pytest.raises(ValueError, match="only supported"):
+def test_provider_api_type_uses_registry_field_capabilities() -> None:
+    with pytest.raises(ValueError, match="not supported"):
         Config.model_validate({
             "providers": {
                 "custom": {
@@ -45,6 +48,338 @@ def test_provider_api_type_is_openai_only() -> None:
                     "apiType": "responses",
                 }
             }
+        })
+
+
+def test_resolve_provider_ref_exposes_registry_metadata() -> None:
+    config = Config.model_validate({
+        "providers": {
+            "openai": {
+                "apiKey": "sk-test",
+                "apiType": "responses",
+            },
+        },
+        "agents": {
+            "defaults": {
+                "model": "openai/gpt-4.1",
+                "provider": "auto",
+            }
+        },
+    })
+
+    provider_ref = config.resolve_provider_ref()
+
+    assert provider_ref.requested_name == "auto"
+    assert provider_ref.name == "openai"
+    assert provider_ref.spec is not None
+    assert provider_ref.spec.supports_config_field("api_type")
+    assert provider_ref.api_type == "responses"
+
+
+def test_bedrock_provider_ref_exposes_region_and_profile() -> None:
+    config = Config.model_validate({
+        "providers": {
+            "bedrock": {
+                "region": "us-east-1",
+                "profile": "work",
+            },
+        },
+        "agents": {
+            "defaults": {
+                "model": "bedrock/anthropic.claude-opus-4-5",
+                "provider": "bedrock",
+            }
+        },
+    })
+
+    provider_ref = config.resolve_provider_ref()
+
+    assert provider_ref.name == "bedrock"
+    assert provider_ref.spec is not None
+    assert provider_ref.spec.supports_config_field("region")
+    assert provider_ref.spec.supports_config_field("profile")
+    assert provider_ref.region == "us-east-1"
+    assert provider_ref.profile == "work"
+
+
+def test_provider_alias_resolves_backend_and_overrides_config() -> None:
+    config = Config.model_validate({
+        "providers": {
+            "openai": {
+                "apiKey": "base-key",
+                "apiBase": "https://api.openai.com/v1",
+                "extraHeaders": {"X-Base": "1"},
+            },
+        },
+        "providerAliases": {
+            "custom-image-provider": {
+                "provider": "openai",
+                "apiKey": "alias-key",
+                "apiBase": "https://api.example.test/v1",
+                "apiType": "responses",
+                "extraBody": {"tools": [{"type": "image_generation"}]},
+            },
+        },
+        "agents": {
+            "defaults": {
+                "model": "gpt-5.1",
+                "provider": "custom-image-provider",
+            },
+        },
+    })
+
+    provider_ref = config.resolve_provider_ref()
+    provider = config.get_provider()
+
+    assert provider_ref.requested_name == "custom-image-provider"
+    assert provider_ref.name == "openai"
+    assert provider_ref.api_type == "responses"
+    assert config.get_provider_name() == "openai"
+    assert config.get_api_key() == "alias-key"
+    assert config.get_api_base() == "https://api.example.test/v1"
+    assert provider is not None
+    assert provider.extra_headers == {"X-Base": "1"}
+    assert provider.extra_body == {"tools": [{"type": "image_generation"}]}
+    assert config.providers.openai.api_key == "base-key"
+
+
+def test_provider_alias_inherits_base_provider_fields() -> None:
+    config = Config.model_validate({
+        "providers": {
+            "openai": {
+                "apiKey": "base-key",
+                "apiBase": "https://base.example.test/v1",
+                "apiType": "responses",
+                "extraBody": {"store": False},
+            },
+        },
+        "providerAliases": {
+            "custom-provider": {
+                "provider": "openai",
+                "apiBase": "https://api.example.test/v1",
+            },
+        },
+        "agents": {
+            "defaults": {
+                "model": "gpt-5.1",
+                "provider": "custom-provider",
+            },
+        },
+    })
+
+    provider = config.get_provider()
+
+    assert config.get_provider_name() == "openai"
+    assert provider is not None
+    assert provider.api_key == "base-key"
+    assert provider.api_base == "https://api.example.test/v1"
+    assert provider.api_type == "responses"
+    assert provider.extra_body == {"store": False}
+
+
+def test_save_config_omits_unset_provider_alias_defaults(tmp_path) -> None:
+    config_path = tmp_path / "config.json"
+    config = Config.model_validate({
+        "providers": {
+            "openai": {
+                "apiKey": "base-key",
+                "apiType": "responses",
+            },
+        },
+        "providerAliases": {
+            "custom-provider": {
+                "provider": "openai",
+            },
+        },
+    })
+
+    save_config(config, config_path)
+
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+    assert "provider_aliases" not in data
+    assert data["providerAliases"]["custom-provider"] == {"provider": "openai"}
+
+    reloaded = load_config(config_path)
+    alias_ref = reloaded._resolve_provider_alias("custom-provider")
+    assert alias_ref is not None
+    assert alias_ref.config.api_key == "base-key"
+    assert alias_ref.config.api_type == "responses"
+
+
+def test_provider_alias_preserves_explicit_null_override_after_save_load(tmp_path) -> None:
+    config_path = tmp_path / "config.json"
+    config = Config.model_validate({
+        "providers": {
+            "custom": {
+                "apiKey": "base-key",
+                "apiBase": "https://base.example.test/v1",
+            },
+        },
+        "providerAliases": {
+            "local-custom": {
+                "provider": "custom",
+                "apiKey": None,
+                "apiBase": "http://localhost:11434/v1",
+            },
+        },
+    })
+
+    save_config(config, config_path)
+
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+    assert data["providerAliases"]["local-custom"]["apiKey"] is None
+    assert data["providerAliases"]["local-custom"]["apiBase"] == "http://localhost:11434/v1"
+
+    reloaded = load_config(config_path)
+    alias_ref = reloaded._resolve_provider_alias("local-custom")
+    assert alias_ref is not None
+    assert alias_ref.config.api_key is None
+    assert alias_ref.config.api_base == "http://localhost:11434/v1"
+
+
+def test_save_config_omits_empty_provider_aliases(tmp_path) -> None:
+    config_path = tmp_path / "config.json"
+
+    save_config(Config(), config_path)
+
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+    assert "providerAliases" not in data
+    assert "provider_aliases" not in data
+
+
+def test_provider_alias_preserves_explicit_auto_api_type_after_save_load(tmp_path) -> None:
+    config_path = tmp_path / "config.json"
+    config = Config.model_validate({
+        "providers": {
+            "openai": {
+                "apiKey": "base-key",
+                "apiType": "responses",
+            },
+        },
+        "providerAliases": {
+            "openai-auto": {
+                "provider": "openai",
+                "apiType": "auto",
+            },
+        },
+        "agents": {
+            "defaults": {
+                "model": "gpt-4.1",
+                "provider": "openai-auto",
+            },
+        },
+    })
+
+    save_config(config, config_path)
+
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+    assert data["providerAliases"]["openai-auto"]["apiType"] == "auto"
+
+    reloaded = load_config(config_path)
+    provider_ref = reloaded.resolve_provider_ref()
+    assert provider_ref.api_type == "auto"
+
+
+def test_bedrock_provider_alias_overrides_region_and_profile() -> None:
+    config = Config.model_validate({
+        "providers": {
+            "bedrock": {
+                "region": "us-east-1",
+                "profile": "default",
+            },
+        },
+        "providerAliases": {
+            "bedrock-eu": {
+                "provider": "bedrock",
+                "region": "eu-west-1",
+                "profile": "prod",
+            },
+        },
+        "agents": {
+            "defaults": {
+                "model": "bedrock/anthropic.claude-opus-4-5",
+                "provider": "bedrock-eu",
+            },
+        },
+    })
+
+    provider_ref = config.resolve_provider_ref()
+
+    assert provider_ref.name == "bedrock"
+    assert provider_ref.region == "eu-west-1"
+    assert provider_ref.profile == "prod"
+    assert config.providers.bedrock.region == "us-east-1"
+    assert config.providers.bedrock.profile == "default"
+
+
+def test_provider_alias_rejects_builtin_name() -> None:
+    with pytest.raises(ValueError, match="conflicts with a built-in provider"):
+        Config.model_validate({
+            "providerAliases": {
+                "openai": {
+                    "provider": "openai",
+                    "apiKey": "alias-key",
+                },
+            },
+        })
+
+
+def test_provider_alias_rejects_reserved_auto_name() -> None:
+    with pytest.raises(ValueError, match="conflicts with a built-in provider"):
+        Config.model_validate({
+            "providerAliases": {
+                "auto": {
+                    "provider": "openai",
+                    "apiKey": "alias-key",
+                },
+            },
+        })
+
+
+def test_provider_alias_rejects_unknown_provider() -> None:
+    with pytest.raises(ValueError, match="targets unknown provider"):
+        Config.model_validate({
+            "providerAliases": {
+                "unknown-alias": {
+                    "provider": "missing",
+                    "apiKey": "alias-key",
+                },
+            },
+        })
+
+
+def test_provider_alias_rejects_oauth_provider() -> None:
+    with pytest.raises(ValueError, match="cannot target OAuth provider"):
+        Config.model_validate({
+            "providerAliases": {
+                "codex-alt": {
+                    "provider": "openai_codex",
+                },
+            },
+        })
+
+
+def test_provider_alias_rejects_unsupported_config_field() -> None:
+    with pytest.raises(ValueError, match="api_type is not supported"):
+        Config.model_validate({
+            "providerAliases": {
+                "anthropic-responses": {
+                    "provider": "anthropic",
+                    "apiType": "responses",
+                    "apiKey": "alias-key",
+                },
+            },
+        })
+
+    with pytest.raises(ValueError, match="region is not supported"):
+        Config.model_validate({
+            "providerAliases": {
+                "openai-eu": {
+                    "provider": "openai",
+                    "apiKey": "alias-key",
+                    "region": "eu-west-1",
+                },
+            },
         })
 
 

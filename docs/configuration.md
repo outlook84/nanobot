@@ -978,13 +978,53 @@ Existing configs do not need to change. If you do not set `modelPresets` or `age
 | Field | Description |
 |-------|-------------|
 | `model` | Model name to use for this preset. |
-| `provider` | Provider name, or `"auto"` to use provider auto-detection. |
+| `provider` | Provider name, provider alias name, or `"auto"` to use provider auto-detection. |
 | `maxTokens` | Maximum completion/output tokens. |
 | `contextWindowTokens` | Context window size used by prompt building and consolidation decisions. |
 | `temperature` | Sampling temperature. |
 | `reasoningEffort` | Optional reasoning/thinking setting. Provider support varies. |
 
 `default` is reserved and always means the implicit preset built from `agents.defaults.*`; do not define `modelPresets.default`. Use `/model default` to switch back to `agents.defaults.*`.
+
+### Provider Aliases
+
+`providerAliases` lets you name a provider-specific overlay and use that name anywhere a model preset or `agents.defaults.provider` accepts a provider. This is useful when several presets use the same built-in provider backend with different credentials, base URLs, headers, request body options, or Bedrock region/profile settings.
+
+Each alias targets one built-in provider with `provider`. Alias entries cannot target another alias, cannot reuse a built-in provider name, cannot use the reserved name `auto`, and cannot target OAuth providers such as `openai_codex` or `github_copilot`.
+
+```json
+{
+  "providers": {
+    "custom": {
+      "apiKey": "${REMOTE_CUSTOM_API_KEY}",
+      "apiBase": "https://remote.example.com/v1"
+    }
+  },
+  "providerAliases": {
+    "local-custom": {
+      "provider": "custom",
+      "apiKey": null,
+      "apiBase": "http://localhost:11434/v1"
+    }
+  },
+  "modelPresets": {
+    "local": {
+      "provider": "local-custom",
+      "model": "llama3.2"
+    }
+  }
+}
+```
+
+Alias fields are overlays on top of the target provider:
+
+| Alias field state | Behavior |
+|-------------------|----------|
+| Field omitted | Inherit the target provider value. |
+| Field set to a value | Override the target provider value. |
+| Field set to `null` | Explicitly clear the target provider value. |
+
+For example, `"apiKey": null` means "do not inherit the base provider API key" for a local or direct endpoint that does not require authentication. It is not sent as a literal API key.
 
 ### Model Fallbacks
 
